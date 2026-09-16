@@ -35,13 +35,13 @@ echo "Initializing Prisma..."
 npx prisma init --datasource-provider mysql --output ../generated/prisma
 
 echo "Adding shadow database URL to Prisma config..."
-if ! grep -Fq 'url: process.env["DATABASE_URL"],' prisma.config.ts; then
-  echo 'Error: Could not find datasource url in prisma.config.ts.' >&2
+if ! grep -Fq 'url: process.env["DATABASE_URL"],' prisma7.config.ts; then
+  echo 'Error: Could not find datasource url in prisma7.config.ts.' >&2
   echo 'Expected line: url: process.env["DATABASE_URL"],' >&2
   exit 1
 fi
 
-if ! grep -Fq "shadowDatabaseUrl:" prisma.config.ts; then
+if ! grep -Fq "shadowDatabaseUrl:" prisma7.config.ts; then
   awk '
     {
       print
@@ -51,8 +51,8 @@ if ! grep -Fq "shadowDatabaseUrl:" prisma.config.ts; then
         print indent "shadowDatabaseUrl: process.env['\''SHADOW_DATABASE_URL'\''],"
       }
     }
-  ' prisma.config.ts > prisma.config.ts.tmp
-  mv prisma.config.ts.tmp prisma.config.ts
+  ' prisma7.config.ts > prisma7.config.ts.tmp
+  mv prisma7.config.ts.tmp prisma7.config.ts
 fi
 
 npx prisma generate
