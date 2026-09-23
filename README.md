@@ -18,7 +18,7 @@ Run the script from the directory where you want to create the application, usin
 bash /path/to/setup-script/setup.sh my-app
 ```
 
-Use a new, simple folder name such as `my-app`. The script also uses this argument to name the Docker container (`my-app-dev`), so avoid passing a path containing slashes.
+Pass a folder name or a relative or absolute path, including `.` to use the current directory. The script uses the destination directory's name for the Docker container: `my-app`, `./my-app`, and `/path/to/my-app` all produce `my-app-dev`. Using `.` inside `my-app` also produces `my-app-dev`.
 
 The script creates and enters the folder, installs dependencies, writes application files, starts MySQL, formats the project, and creates an initial Git commit. It stops on errors and leaves any files already created in place; it is intended for fresh projects rather than rerunning over an existing application.
 

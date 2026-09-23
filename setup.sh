@@ -15,6 +15,7 @@ echo "Creating project in: $PROJECT_DIR"
 
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
+PROJECT_NAME="$(basename "$PWD")"
 
 echo "Creating Next.js app..."
 npx create-next-app@latest .  \
@@ -582,7 +583,7 @@ cat > docker-compose.yml <<EOF
 services:
   mysql:
     image: mysql:8
-    container_name: ${PROJECT_DIR}-dev
+    container_name: ${PROJECT_NAME}-dev
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpass
