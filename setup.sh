@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# bash <(curl -fsSL https://gist.githubusercontent.com/PeterHedemann/5e9c4e700288d00fe8bf772a87749fa5/raw) {foldername}
+# bash <(curl -fsSL https://gist.githubusercontent.com/PeterHedemann/1c1d6235c57483f4b6081f683cf953b7/raw) {foldername}
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ echo "Installing dependencies..."
 # Better Auth supports Prisma 5–7; keep all Prisma packages on major 7
 # instead of allowing the default npm tag to select Prisma 8 prereleases.
 npm install prisma@7 @types/node --save-dev
-npm install @prisma/client@7 @prisma/adapter-mariadb@7 dotenv better-auth @better-auth/prisma-adapter zod
+npm install @prisma/client@7 @prisma/adapter-mariadb@7 dotenv better-auth @better-auth/prisma-adapter @better-auth/passkey resend zod
 
 echo "Initializing Prisma..."
 npx prisma init --datasource-provider mysql --output ../generated/prisma
