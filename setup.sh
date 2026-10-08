@@ -67,6 +67,10 @@ DATABASE_URL="mysql://myuser:mypass@127.0.0.1:3306/app_dev"
 SHADOW_DATABASE_URL="mysql://myuser:mypass@127.0.0.1:3306/app_shadow"
 NODE_ENV="development"
 PORT=3000
+
+# Production only: use a sender on a verified Resend domain.
+RESEND_API_KEY=<PROD ONLY>
+RESEND_FROM_EMAIL="Monopopoly <auth@example.com>"
 EOF
 
 echo "Writing .env.example..."
@@ -77,6 +81,9 @@ DATABASE_URL="mysql://myuser:mypass@127.0.0.1:3306/app_dev"
 SHADOW_DATABASE_URL="mysql://myuser:mypass@127.0.0.1:3306/app_shadow"
 NODE_ENV="development"
 PORT=3000
+# Production only: use a sender on a verified Resend domain.
+RESEND_API_KEY=API_KEY_HERE
+RESEND_FROM_EMAIL="Monopopoly <auth@example.com>"
 EOF
 
 echo "Creating folders..."
@@ -84,6 +91,8 @@ mkdir -p lib
 mkdir -p lib/actions
 mkdir -p app/api/auth/[...all]
 mkdir -p app/signin
+mkdir -p app/signin
+mkdir -p app/components
 mkdir -p app/signup
 mkdir -p app/signedout
 mkdir -p init-db
@@ -134,16 +143,35 @@ cat > lib/auth.ts <<'EOF'
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { nextCookies } from "better-auth/next-js";
+import { emailOTP } from "better-auth/plugins";
+import { passkey } from "@better-auth/passkey";
 import { prisma } from "./prisma";
+import { sendVerificationCode } from "./email";
+
+const origin = new URL(process.env.BETTER_AUTH_URL ?? "http://localhost:3000").origin;
 
 export const auth = betterAuth({
-  database: prismaAdapter(prisma, {
-    provider: "mysql",
-  }),
-  emailAndPassword: {
-    enabled: true,
-  },
-  plugins: [nextCookies()],
+  database: prismaAdapter(prisma, { provider: "mysql" }),
+  emailAndPassword: { enabled: false },
+  rateLimit: { enabled: true },
+  plugins: [
+    emailOTP({
+      otpLength: 6,
+      expiresIn: 300,
+      allowedAttempts: 3,
+      storeOTP: "hashed",
+      async sendVerificationOTP({ email, otp }) {
+        await sendVerificationCode(email, otp);
+      },
+    }),
+    passkey({
+      rpID: new URL(origin).hostname,
+      rpName: "Monopopoly",
+      origin,
+      authenticatorSelection: { residentKey: "required", userVerification: "required" },
+    }),
+    nextCookies(),
+  ],
 });
 EOF
 
@@ -279,6 +307,75 @@ body {
 }
 EOF
 
+echo "Writing app/components/email-code-form.tsx..."
+cat > app/components/email-code-form.tsx <<'EOF'
+"use client";
+
+import { useState, type FormEvent } from "react";
+import { authClient } from "@/lib/auth-client";
+
+const inputClass = "mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950";
+export const buttonClass = "w-full rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-500";
+
+export function EmailCodeForm({ onVerified }: { onVerified: (email: string) => void }) {
+  const [email, setEmail] = useState("");
+  const [otp, setOtp] = useState("");
+  const [sent, setSent] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function sendCode() {
+    setPending(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await authClient.emailOtp.sendVerificationOtp({ email: email.trim(), type: "sign-in" });
+      if (result.error) { setError(result.error.message ?? "Unable to send a code. Please try again."); return; }
+      setSent(true);
+      setOtp("");
+      setNotice("A new code has been sent. It expires in five minutes.");
+    } catch { setError("Unable to send a code. Please try again."); }
+    finally { setPending(false); }
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!sent) { await sendCode(); return; }
+    setPending(true);
+    setError("");
+    try {
+      const result = await authClient.signIn.emailOtp({ email: email.trim(), otp, name: email.trim() });
+      if (result.error) { setError(result.error.message ?? "Unable to verify this code."); return; }
+      onVerified(result.data.user.email);
+    } catch { setError("Unable to verify this code. Please try again."); }
+    finally { setPending(false); }
+  }
+
+  return (
+    <form onSubmit={submit} className="mt-6 space-y-4">
+      {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+      {notice && <p role="status" className="text-sm text-zinc-600">{notice}</p>}
+      <label className="block text-sm font-medium">Email
+        <input type="email" name="email" autoComplete="email" required value={email} disabled={sent || pending}
+          onChange={(event) => setEmail(event.target.value)} className={inputClass} />
+      </label>
+      {sent && <label className="block text-sm font-medium">Verification code
+        <input name="otp" autoComplete="one-time-code" inputMode="numeric" pattern="[0-9]{6}" maxLength={6}
+          required value={otp} disabled={pending} onChange={(event) => setOtp(event.target.value)} className={inputClass} />
+      </label>}
+      <button disabled={pending} className={buttonClass}>
+        {pending ? "Please wait..." : sent ? "Verify email" : "Send verification code"}
+      </button>
+      {sent && <div className="flex justify-between text-sm">
+        <button type="button" disabled={pending} onClick={sendCode}>Resend code</button>
+        <button type="button" disabled={pending} onClick={() => { setSent(false); setOtp(""); setError(""); setNotice(""); }}>Use another email</button>
+      </div>}
+    </form>
+  );
+}
+EOF
+
 echo "Writing app/signin/page.tsx..."
 cat > app/signin/page.tsx <<'EOF'
 import Link from "next/link";
@@ -311,99 +408,65 @@ echo "Writing app/signin/signin-form.tsx..."
 cat > app/signin/signin-form.tsx <<'EOF'
 "use client";
 
-import { useActionState } from "react";
-import { SignInAction, type SignInFormData } from "@/lib/actions/signin";
-import type { FormState } from "@/lib/utils";
-
-const initialState: FormState<SignInFormData> = {
-  status: "initial",
-};
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { authClient } from "@/lib/auth-client";
+import { EmailCodeForm, buttonClass } from "@/app/components/email-code-form";
 
 export function SignInForm() {
-  const [state, formAction, pending] = useActionState(
-    SignInAction,
-    initialState,
-  );
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [useEmail, setUseEmail] = useState(false);
+  const router = useRouter();
+  function finish() { router.replace("/"); router.refresh(); }
 
-  const formErrors = state.status === "error" ? state.errors.formErrors : [];
-  const fieldErrors =
-    state.status === "error" ? state.errors.fieldErrors : undefined;
+  async function signIn() {
+    setError("");
+    if (!window.isSecureContext || !window.PublicKeyCredential) {
+      setError("Passkeys require a supported browser using HTTPS or localhost. You can also use an email code.");
+      return;
+    }
+    setPending(true);
+    try {
+      const result = await authClient.signIn.passkey();
+      if (result.error || !result.data) {
+        setError(result.error?.message ?? "Sign-in was cancelled. Please try again.");
+        return;
+      }
+      finish();
+    } catch { setError("Unable to sign in. Please try again."); }
+    finally { setPending(false); }
+  }
 
-  return (
-    <form action={formAction} className="mt-6 space-y-4">
-      {formErrors.length > 0 && (
-        <div
-          aria-live="polite"
-          className="rounded-md bg-red-50 p-3 text-sm text-red-700"
-        >
-          {formErrors.map((error) => (
-            <p key={error}>{error}</p>
-          ))}
-        </div>
-      )}
-
-      <label className="block text-sm font-medium">
-        Email
-        <input
-          name="email"
-          type="email"
-          required
-          defaultValue={state.data?.email}
-          aria-invalid={Boolean(fieldErrors?.email)}
-          aria-describedby={fieldErrors?.email ? "email-error" : undefined}
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.email && (
-        <p id="email-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.email[0]}
-        </p>
-      )}
-
-      <label className="block text-sm font-medium">
-        Password
-        <input
-          name="password"
-          type="password"
-          required
-          aria-invalid={Boolean(fieldErrors?.password)}
-          aria-describedby={
-            fieldErrors?.password ? "password-error" : undefined
-          }
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.password && (
-        <p id="password-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.password[0]}
-        </p>
-      )}
-
-      <button
-        type="submit"
-        disabled={pending}
-        className="w-full rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-500"
-      >
-        {pending ? "Signing in..." : "Sign in"}
-      </button>
-    </form>
-  );
+  return <div className="mt-6 space-y-4">
+    {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+    <button type="button" onClick={signIn} disabled={pending} className={buttonClass}>
+      {pending ? "Signing in..." : "Sign in with a passkey"}
+    </button>
+    <button type="button" disabled={pending} onClick={() => setUseEmail(!useEmail)} className="text-sm text-zinc-600">
+      {useEmail ? "Hide email sign-in" : "Lost your passkey? Use an email code"}
+    </button>
+    {useEmail && <EmailCodeForm onVerified={finish} />}
+  </div>;
 }
 EOF
 
 echo "Writing app/signup/page.tsx..."
 cat > app/signup/page.tsx <<'EOF'
+import { auth } from "@/lib/auth";
+import { headers } from "next/headers";
 import Link from "next/link";
 import { SignUpForm } from "./signup-form";
 
-export default function SignUpPage() {
+export default async function SignUpPage() {
+  const session = await auth.api.getSession({ headers: await headers() });
   return (
     <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 text-zinc-950">
       <section className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-8 shadow-sm">
         <p className="text-sm font-medium text-zinc-500">Create an account</p>
         <h1 className="mt-3 text-3xl font-semibold">Sign up</h1>
 
-        <SignUpForm />
+        <SignUpForm verifiedEmail={session?.user.emailVerified ? session.user.email : undefined} />
 
         <Link
           href="/"
@@ -421,120 +484,46 @@ echo "Writing app/signup/signup-form.tsx..."
 cat > app/signup/signup-form.tsx <<'EOF'
 "use client";
 
-import { useActionState } from "react";
-import { SignUpAction, type SignUpFormData } from "@/lib/actions/signup";
-import type { FormState } from "@/lib/utils";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { authClient } from "@/lib/auth-client";
+import { EmailCodeForm, buttonClass } from "@/app/components/email-code-form";
 
-const initialState: FormState<SignUpFormData> = {
-  status: "initial",
-};
+export function SignUpForm({ verifiedEmail }: { verifiedEmail?: string }) {
+  const [email, setEmail] = useState(verifiedEmail);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const router = useRouter();
 
-export function SignUpForm() {
-  const [state, formAction, pending] = useActionState(
-    SignUpAction,
-    initialState,
-  );
+  async function createPasskey() {
+    setError("");
+    if (!window.isSecureContext || !window.PublicKeyCredential) {
+      setError("Passkeys require a supported browser using HTTPS or localhost.");
+      return;
+    }
+    setPending(true);
+    try {
+      const result = await authClient.passkey.addPasskey({ name: "Monopopoly passkey" });
+      if (result.error || !result.data) {
+        setError(result.error?.message ?? "Passkey creation was cancelled. Please try again.");
+        return;
+      }
+      router.replace("/");
+      router.refresh();
+    } catch { setError("Unable to create a passkey. Please try again."); }
+    finally { setPending(false); }
+  }
 
-  const formErrors = state.status === "error" ? state.errors.formErrors : [];
-  const fieldErrors =
-    state.status === "error" ? state.errors.fieldErrors : undefined;
+  if (!email) return <EmailCodeForm onVerified={setEmail} />;
 
-  return (
-    <form action={formAction} className="mt-6 space-y-4">
-      {formErrors.length > 0 && (
-        <div
-          aria-live="polite"
-          className="rounded-md bg-red-50 p-3 text-sm text-red-700"
-        >
-          {formErrors.map((error) => (
-            <p key={error}>{error}</p>
-          ))}
-        </div>
-      )}
-
-      <label className="block text-sm font-medium">
-        Name
-        <input
-          name="name"
-          type="text"
-          required
-          defaultValue={state.data?.name}
-          aria-invalid={Boolean(fieldErrors?.name)}
-          aria-describedby={fieldErrors?.name ? "name-error" : undefined}
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.name && (
-        <p id="name-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.name[0]}
-        </p>
-      )}
-
-      <label className="block text-sm font-medium">
-        Email
-        <input
-          name="email"
-          type="email"
-          required
-          defaultValue={state.data?.email}
-          aria-invalid={Boolean(fieldErrors?.email)}
-          aria-describedby={fieldErrors?.email ? "email-error" : undefined}
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.email && (
-        <p id="email-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.email[0]}
-        </p>
-      )}
-
-      <label className="block text-sm font-medium">
-        Password
-        <input
-          name="password"
-          type="password"
-          required
-          aria-invalid={Boolean(fieldErrors?.password)}
-          aria-describedby={
-            fieldErrors?.password ? "password-error" : undefined
-          }
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.password && (
-        <p id="password-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.password[0]}
-        </p>
-      )}
-
-      <label className="block text-sm font-medium">
-        Repeat password
-        <input
-          name="repeatPassword"
-          type="password"
-          required
-          aria-invalid={Boolean(fieldErrors?.repeatPassword)}
-          aria-describedby={
-            fieldErrors?.repeatPassword ? "repeat-password-error" : undefined
-          }
-          className="mt-2 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none focus:border-zinc-950"
-        />
-      </label>
-      {fieldErrors?.repeatPassword && (
-        <p id="repeat-password-error" className="-mt-2 text-sm text-red-700">
-          {fieldErrors.repeatPassword[0]}
-        </p>
-      )}
-
-      <button
-        type="submit"
-        disabled={pending}
-        className="w-full rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-500"
-      >
-        {pending ? "Creating account..." : "Create account"}
-      </button>
-    </form>
-  );
+  return <div className="mt-6 space-y-4">
+    <p className="text-sm text-zinc-600">Email confirmed: {email}. Create a passkey to finish setting up your account.</p>
+    <p className="text-sm text-zinc-600">Your device will ask you to use your fingerprint, face, PIN, or security key.</p>
+    {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+    <button type="button" disabled={pending} onClick={createPasskey} className={buttonClass}>
+      {pending ? "Creating passkey..." : "Create passkey"}
+    </button>
+  </div>;
 }
 EOF
 
@@ -617,7 +606,7 @@ cat > lib/users.ts <<'EOF'
 "use server";
 
 import { auth } from "@/lib/auth";
-import { APIError } from "better-auth/api";
+import { prisma } from "@/lib/prisma";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import type { User as PrismaUser } from "../generated/prisma/client";
@@ -626,66 +615,10 @@ export type User = Omit<PrismaUser, "image"> & {
   image?: PrismaUser["image"];
 };
 
-export type Error = {
-  message: string;
-};
-
-export type Result<T> =
-  | { success: true; data: T }
-  | { success: false; message: string };
-
-export const signIn = async (
-  email: string,
-  password: string
-): Promise<Result<User>> => {
-  try {
-    const { user } = await auth.api.signInEmail({
-      body: { email, password },
-    });
-
-    return { success: true, data: user as User };
-  } catch (error) {
-    console.error("Error signing in:", error);
-
-    return {
-      success: false,
-      message: "Invalid email or password.",
-    };
-  }
-};
-
 export const signOut = async () => {
   await auth.api.signOut({
     headers: await headers(),
   });
-};
-
-export const signUp = async (
-  name: string,
-  email: string,
-  password: string
-): Promise<Result<User>> => {
-  try {
-    const { user } = await auth.api.signUpEmail({
-      body: { name, email, password },
-    });
-
-    return { success: true, data: user as User };
-  } catch (error) {
-    if (error instanceof APIError) {
-      console.log("API Error:", error.message);
-
-      return {
-        success: false,
-        message: error.message,
-      };
-    }
-
-    return {
-      success: false,
-      message: "Error signing up",
-    };
-  }
 };
 
 export const getCurrentUser = async (): Promise<User | null> => {
@@ -695,6 +628,17 @@ export const getCurrentUser = async (): Promise<User | null> => {
 
   if (!session) {
     return null;
+  }
+
+  const passkey = session.user.emailVerified
+    ? await prisma.passkey.findFirst({
+        where: { userId: session.user.id },
+        select: { id: true },
+      })
+    : null;
+
+  if (!passkey) {
+    redirect("/signup");
   }
 
   return session.user as User;
@@ -734,92 +678,40 @@ export type FormState<T> =
     };
 EOF
 
-echo "Writing lib/actions/signin.ts..."
-cat > lib/actions/signin.ts <<'EOF'
-"use server";
+echo "Writing lib/auth-client.ts"
+cat > lib/auth-client.ts <<'EOF'
+import { createAuthClient } from "better-auth/react";
+import { emailOTPClient } from "better-auth/client/plugins";
+import { passkeyClient } from "@better-auth/passkey/client";
 
-import { signIn } from "@/lib/users";
-import { redirect } from "next/navigation";
-import { FormState } from "../utils";
-import * as z from "zod";
-
-const SignInSchema = z.object({
-    email: z.email(),
-    password: z.string("Password is required").min(8, "Password is at least 8 characters")
+export const authClient = createAuthClient({
+  plugins: [emailOTPClient(), passkeyClient()],
 });
-
-export type SignInFormData = z.infer<typeof SignInSchema>;
-
-export async function SignInAction(
-    prevState: FormState<SignInFormData>,
-    formData: FormData
-): Promise<FormState<SignInFormData>> {
-    const email = formData.get("email") as string;
-    const password = formData.get("password") as string;
-
-    const data = {email, password};
-
-    const parsedData = SignInSchema.safeParse(data);
-
-    if(!parsedData.success) {
-        const errors = z.flattenError(parsedData.error)
-        return { status: "error", data, errors };
-    }
-    const result = await signIn(email, password);
-    
-    if (result.success) {
-        redirect("/");
-    }
-
-    return { status: "error", data, errors: {formErrors: [result.message]}}
-}
 EOF
 
-echo "Writing lib/actions/signup.ts..."
-cat > lib/actions/signup.ts <<'EOF'
-"use server";
+echo "Writing lib/email.ts"
+cat > lib/email.ts <<'EOF'
+import { Resend } from "resend";
 
-import { signUp } from "@/lib/users";
-import { redirect } from "next/navigation";
-import { FormState } from "../utils";
-import * as z from "zod";
+export async function sendVerificationCode(email: string, otp: string) {
+  if (process.env.NODE_ENV !== "production") {
+    console.info(`[auth] Verification code for ${email}: ${otp}`);
+    return;
+  }
 
-const SignUpSchema = z.object({
-    name: z.string().trim().min(1, "Name is required"),
-    email: z.email("Email is required"),
-    password: z.string("Password is required").min(8, "Password should be at least 8 characters"),
-    repeatPassword: z.string("Please repeat your chosen password"),
-}).refine((data) => data.password === data.repeatPassword, {
-    message: "Passwords don't match",
-    path: ["repeatPassword"],
-});
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM_EMAIL;
+  if (!apiKey || !from) {
+    throw new Error("RESEND_API_KEY and RESEND_FROM_EMAIL are required in production");
+  }
 
-export type SignUpFormData = z.infer<typeof SignUpSchema>;
-
-export async function SignUpAction(
-    prevState: FormState<SignUpFormData>,
-    formData: FormData
-): Promise<FormState<SignUpFormData>> {
-    const name = formData.get("name") as string;
-    const email = formData.get("email") as string;
-    const password = formData.get("password") as string;
-    const repeatPassword = formData.get("repeatPassword") as string;
-
-    const data = { name, email, password, repeatPassword }
-    const parsedData = SignUpSchema.safeParse(data);
-
-    if (!parsedData.success) {
-        const errors = z.flattenError(parsedData.error);
-        return { status: "error", data, errors }
-    }
-
-    const result = await signUp(name, email, password);
-    
-    if (result.success) {
-        redirect("/");
-    } else {
-        return { status: "error", data, errors: { formErrors: [result.message] } };
-    }
+  const { error } = await new Resend(apiKey).emails.send({
+    from,
+    to: email,
+    subject: "Your Monopopoly verification code",
+    text: `Your verification code is ${otp}. It expires in 5 minutes. If you did not request this code, you can ignore this email.`,
+  });
+  if (error) throw new Error("Unable to send verification email");
 }
 EOF
 
