@@ -277,6 +277,21 @@ export default function RootLayout({
 }
 EOF
 
+echo "Writing app/loading.tsx..."
+cat > app/loading.tsx <<'EOF'
+export default function Loading() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 text-zinc-950">
+      <section className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-8 shadow-sm">
+        <p role="status" className="text-sm font-medium text-zinc-500">
+          Loading...
+        </p>
+      </section>
+    </main>
+  );
+}
+EOF
+
 echo "Writing app/globals.css..."
 cat > app/globals.css <<'EOF'
 @import "tailwindcss";
@@ -789,3 +804,4 @@ echo ""
 echo "To delete the database later, run:"
 echo ""
 echo "   docker compose down -v"
+
